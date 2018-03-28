@@ -3,6 +3,7 @@ package logrus_mail
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/mail"
@@ -25,6 +26,17 @@ type MailHook struct {
 
 // MailAuthHook to sends logs by email with authentication.
 type MailAuthHook struct {
+	AppName  string
+	Host     string
+	Port     int
+	From     *mail.Address
+	To       *mail.Address
+	Username string
+	Password string
+}
+
+// MailAuthLoginHook to sends logs by email with authentication using AUTH LOGIN.
+type MailAuthLoginHook struct {
 	AppName  string
 	Host     string
 	Port     int
@@ -96,6 +108,35 @@ func NewMailAuthHook(appname string, host string, port int, from string, to stri
 		Password: password}, nil
 }
 
+// NewMailAuthLoginHook creates a hook to be added to an instance of logger.
+func NewMailAuthLoginHook(appname string, host string, port int, from string, to string, username string, password string) (*MailAuthLoginHook, error) {
+	// Check if server listens on that port.
+	conn, err := net.DialTimeout("tcp", host+":"+strconv.Itoa(port), 3*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Validate sender and recipient
+	sender, err := mail.ParseAddress(from)
+	if err != nil {
+		return nil, err
+	}
+	receiver, err := mail.ParseAddress(to)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MailAuthLoginHook{
+		AppName:  appname,
+		Host:     host,
+		Port:     port,
+		From:     sender,
+		To:       receiver,
+		Username: username,
+		Password: password}, nil
+}
+
 // Fire is called when a log event is fired.
 func (hook *MailHook) Fire(entry *logrus.Entry) error {
 	wc, err := hook.c.Data()
@@ -131,6 +172,35 @@ func (hook *MailAuthHook) Fire(entry *logrus.Entry) error {
 	return nil
 }
 
+// Fire is called when a log event is fired.
+func (hook *MailAuthLoginHook) Fire(entry *logrus.Entry) error {
+
+	message := createMessage(entry, hook.AppName)
+
+	// Connect to the server, authenticate, set the sender and recipient,
+	// and send the email all in one step.
+	err := smtp.SendMail(
+		hook.Host+":"+strconv.Itoa(hook.Port),
+		AuthLogin(hook.Username, hook.Password),
+		hook.From.Address,
+		[]string{hook.To.Address},
+		message.Bytes(),
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Levels returns the available logging levels.
+func (hook *MailHook) Levels() []logrus.Level {
+	return []logrus.Level{
+		logrus.PanicLevel,
+		logrus.FatalLevel,
+		logrus.ErrorLevel,
+	}
+}
+
 // Levels returns the available logging levels.
 func (hook *MailAuthHook) Levels() []logrus.Level {
 	return []logrus.Level{
@@ -141,7 +211,7 @@ func (hook *MailAuthHook) Levels() []logrus.Level {
 }
 
 // Levels returns the available logging levels.
-func (hook *MailHook) Levels() []logrus.Level {
+func (hook *MailAuthLoginHook) Levels() []logrus.Level {
 	return []logrus.Level{
 		logrus.PanicLevel,
 		logrus.FatalLevel,
@@ -156,4 +226,34 @@ func createMessage(entry *logrus.Entry, appname string) *bytes.Buffer {
 	contents := fmt.Sprintf("Subject: %s\r\n\r\n%s\r\n\r\n%s", subject, body, fields)
 	message := bytes.NewBufferString(contents)
 	return message
+}
+
+// authLogin contains a username and password for implementing authentication using AUTH LOGIN.
+type authLogin struct {
+	username, password string
+}
+
+// AuthLogin returns an Auth that implements authentication using AUTH LOGIN.
+func AuthLogin(username, password string) smtp.Auth {
+	return &authLogin{username, password}
+}
+
+// Start implements the LOGIN step in AUTH LOGIN.
+func (a *authLogin) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", []byte{}, nil
+}
+
+// Next implements the NEXT step in AUTH LOGIN.
+func (a *authLogin) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch string(fromServer) {
+		case "Username:":
+			return []byte(a.username), nil
+		case "Password:":
+			return []byte(a.password), nil
+		default:
+			return nil, errors.New("Unkown fromServer")
+		}
+	}
+	return nil, nil
 }
